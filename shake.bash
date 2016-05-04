@@ -28,7 +28,7 @@ readonly DEFAULT_COMMANDS_DIRNAME="scripts";
 readonly DEFAULT_COMMAND_PREFIX="cmd-"
 
 # Shake constants
-readonly CONFIG_FILENAME=".shakerc"
+readonly CONFIG_FILENAME="Shakefile"
 readonly INIT_COMMAND="init"
 readonly CREATE_COMMAND="create"
 readonly EDIT_COMMAND="edit"
@@ -344,18 +344,45 @@ function configure_config_file {
 function configure_commands {
   local -r commands_dir="$1"
   local -r command_prefix="$2"
-
-  if test ! -d  "$commands_dir"; then
-    log_debug "commands_dir (${commands_dir}) not found"
-    return
-  fi
-
   local commands=()
 
-  while read -r line; do
-    path=$(basename "$line")
-    commands+=($(sed -E "s/^${command_prefix}([^.]+)\$/\1/" <<< "$path"))
-  done < <(find "$commands_dir" -maxdepth 1 -name "$command_prefix*" -type f -or -type l)
+  local function_commands
+  function_commands=($(compgen -A "function"| grep "$command_prefix" || true))
+
+  local func_name cmd_name
+  for func_name in "${function_commands[@]}"; do
+    cmd_name=${func_name/${command_prefix}/}
+    commands+=($cmd_name)
+    # shellcheck disable=SC1091
+    source /dev/stdin <<-EOF
+    function __cmd_run_${cmd_name} {
+      "$func_name" "\$@"
+    }
+    function __cmd_desc_${cmd_name} {
+      parse_config_desc "$func_name"
+    }
+EOF
+  done
+
+  COMMANDS=("${commands[@]}")
+
+  if test -d  "$commands_dir"; then
+    local filepath path cmd_name
+    while read -r filepath; do
+      path=$(basename "$filepath")
+      cmd_name=$(sed -E "s/^${command_prefix}([^.]+)\.?.*\$/\1/" <<< "$path")
+      commands+=($cmd_name)
+      # shellcheck disable=SC1091
+      source /dev/stdin <<-EOF
+      function __cmd_run_${cmd_name} {
+        "$filepath" "\$@"
+      }
+      function __cmd_desc_${cmd_name} {
+        parse_desc "$filepath"
+      }
+EOF
+    done < <(find "$commands_dir" -maxdepth 1 -name "$command_prefix*" -type f -or -type l)
+  fi
 
   COMMANDS=("${commands[@]}")
 }
@@ -420,35 +447,23 @@ function configure_log_level {
 # is not found then defaults are assumed
 #
 function load_config {
-  local values=()
-  local IFS=","
+  # local values=()
+  # local IFS=","
 
   configure_config_file
   configure_project_root
 
+
   if test -e "$CONFIG_FILE"; then
-    values=($(source_config_file "$CONFIG_FILE"))
+    # shellcheck source=/dev/null
+    source "$CONFIG_FILE"
   fi
 
-  configure_commands_dirname "${values[0]}"
-  configure_command_prefix "${values[1]}"
-  configure_log_level "${values[2]}"
+  # configure_commands_dirname "${COMMANDS_DIRNAME}"
+  # configure_command_prefix "${values[1]}"
+  # configure_log_level "${values[2]}"
 
   configure_commands_dir
-}
-
-#
-# Usage: source_config_filename CONFIG_FILENAME
-#
-# Sources the CONFIG_FILENAME and returns an array of the following
-# values: COMMANDS_DIRNAME COMMAND_PREFIX LOG_LEVEL
-#
-function source_config_file {
-  assert_non_empty "$CONFIG_FILE"
-  # disable shellcheck warning
-  # shellcheck source=/dev/null
-  source "$CONFIG_FILE"
-  echo -e "$COMMANDS_DIRNAME,$COMMAND_PREFIX,$LOG_LEVEL"
 }
 
 #  ██████ ██      ██
@@ -660,17 +675,36 @@ function init {
 # Parses the DESC line out of the command-script file
 #
 function parse_desc {
-  local -r command_name="$1"
-  local -r command_file="${COMMANDS_DIR}/${COMMAND_PREFIX}${command_name}"
+  local -r file="$1"
   local -r re="DESC: *([^$]+)$"
-  local desc=""
+  local desc line
 
   while read -r line; do
     if [[ $line =~ $re ]]; then
       desc="${BASH_REMATCH[1]}"
       break
     fi
-  done < "$command_file"
+  done < "$file"
+
+  echo "$desc"
+}
+
+function parse_config_desc {
+  local -r func_name="$1"
+  local -r config_file="$CONFIG_FILE"
+  local -r fn_re="^(function ${func_name}(\(\))?)|(${func_name} *\(\)) +{"
+  local -r desc_re="# *([^$]+)$"
+  local line last_line desc
+
+  while read -r line; do
+    if [[ $line =~ $fn_re ]]; then
+      if [[ $last_line =~ $desc_re ]]; then
+        desc="${BASH_REMATCH[1]}"
+      fi
+      break
+    fi
+    last_line="$line"
+  done < "$config_file"
 
   echo "$desc"
 }
@@ -700,40 +734,40 @@ function print_help {
   echo -e "  ${ANSI_PINK}--init${ANSI_END}\tInitialize a new shake project"
   echo -e "  ${ANSI_PINK}-h${ANSI_END}, ${ANSI_PINK}--help${ANSI_END}\tPrint this help text and exit"
   echo -e
-  if test -d "$commands_dir"; then
-    if (( ${#commands} == 0 )); then
+  if (( ${#commands} == 0 )); then
+    if test -d "$commands_dir"; then
       echo -e "${ANSI_GRAY}No commands found in:${ANSI_END} $commands_dir"
       echo -e
       echo -e "To create a command, run:"
       echo -e " $ shake --create <command-name>"
     else
-      echo -e "${ANSI_BOLD}Commands${ANSI_END}"
+      echo -e "It appears this directory, or its parent directories,"
+      echo -e "have not been setup to run shake."
       echo -e
-      local has_one_desc=false
-      for command in $commands; do
-        desc=$(parse_desc "$command")
-        if [[ "$has_one_desc" == false && -n "$desc" ]]; then
-          has_one_desc=true
-        fi
-        local nspaces=$(( padding + 2 - ${#command} ))
-        printf "  %b%${nspaces}s%b\n" "${ANSI_GREEN}${command}${ANSI_END}" "" "$desc"
-      done
-      if ! ("$has_one_desc"); then
-        echo -e
-        echo -e "${ANSI_GREEN}TIP:${ANSI_END} You can add a description for your command by adding"
-        echo -e "     a DESC line to your command-script, for example:"
-        echo -e
-        echo -e "       #!/bin/bash"
-        echo -e "       # DESC: start the dev server"
-        echo -e "       ..."
-      fi
+      echo -e "To start using shake run:"
+      echo -e "  $ shake --init"
     fi
   else
-    echo -e "It appears this directory, or its parent directories,"
-    echo -e "have not been setup to run shake."
+    echo -e "${ANSI_BOLD}Commands${ANSI_END}"
     echo -e
-    echo -e "To start using shake run:"
-    echo -e "  $ shake --init"
+    local has_one_desc=false
+    for command in $commands; do
+      desc=$(__cmd_desc_${command})
+      if [[ "$has_one_desc" == false && -n "$desc" ]]; then
+        has_one_desc=true
+      fi
+      local nspaces=$(( padding + 2 - ${#command} ))
+      printf "  %b%${nspaces}s%b\n" "${ANSI_GREEN}${command}${ANSI_END}" "" "$desc"
+    done
+    if ! ("$has_one_desc"); then
+      echo -e
+      echo -e "${ANSI_GREEN}TIP:${ANSI_END} You can add a description for your command by adding"
+      echo -e "     a DESC line to your command-script, for example:"
+      echo -e
+      echo -e "       #!/bin/bash"
+      echo -e "       # DESC: start the dev server"
+      echo -e "       ..."
+    fi
   fi
   echo -e
 }
@@ -883,6 +917,16 @@ function assert_valid_arg {
 }
 
 #
+#
+#
+#
+#
+function shake {
+  local -r cmd_name="$1"
+  "__cmd_run_${cmd_name}" "$@"
+}
+
+#
 # Usage main ARGS ...
 #
 # Parses ARGS to kick off shake. See the output of the print_help
@@ -949,7 +993,7 @@ function main {
 
   case "$cmd" in
     "$CMD_COMMAND")
-      exec "${commands_dir}/${command_prefix}${key}" "$@"
+      shake "$key" "$@"
       ;;
     "$CREATE_COMMAND")
       create_command "$create_target"
