@@ -692,7 +692,7 @@ function parse_desc {
 function parse_config_desc {
   local -r func_name="$1"
   local -r config_file="$CONFIG_FILE"
-  local -r fn_re="^(function ${func_name}(\(\))?)|(${func_name} *\(\)) +{"
+  local -r fn_re="^(function ${func_name}(\(\))?)|(${func_name} *\(\)) +\{"
   local -r desc_re="# *([^$]+)$"
   local line last_line desc
 
@@ -923,7 +923,8 @@ function assert_valid_arg {
 #
 function shake {
   local -r cmd_name="$1"
-  "__cmd_run_${cmd_name}" "$@"
+  local -r args="$2"
+  "__cmd_run_${cmd_name}" ${args[@]}
 }
 
 #
@@ -993,7 +994,7 @@ function main {
 
   case "$cmd" in
     "$CMD_COMMAND")
-      shake "$key" "$@"
+      shake "$key" "$*"
       ;;
     "$CREATE_COMMAND")
       create_command "$create_target"
